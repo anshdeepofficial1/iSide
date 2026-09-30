@@ -1,16 +1,75 @@
 "use client";
 import { useEffect, useState } from "react";
 import { BellRing, RefreshCw, ShieldCheck, Trash2, ExternalLink, AlertTriangle } from "lucide-react";
+
 type Rec={id:string;app:any;updateSource?:{type:string;repo:string}|null;signing?:{authority?:string;expiresAt?:string;status?:string}|null;installedAt:string;latest?:string};
+
 function daysLeft(date?:string){if(!date)return null;return Math.ceil((new Date(date).getTime()-Date.now())/86400000)}
 function cmp(a:string,b:string){const pa=a.split(/[.-]/).map(x=>Number(x)||0),pb=b.split(/[.-]/).map(x=>Number(x)||0);for(let i=0;i<Math.max(pa.length,pb.length);i++){if((pa[i]||0)!==(pb[i]||0))return (pa[i]||0)-(pb[i]||0)}return 0}
 function Nav(){return <div className="nav"><div className="wrap"><div className="navin"><a className="brand" href="/"><img src="/icon.svg" alt="iSide"/><span>iSide</span></a><div className="navlinks"><a href="/">Installer</a><a href="/manager">Manager</a><a href="/privacy">Privacy</a></div></div></div></div>}
+
 export default function Manager(){
- const [apps,setApps]=useState<Rec[]>([]),[checking,setChecking]=useState(false),[notify,setNotify]=useState("default");
- useEffect(()=>{try{setApps(JSON.parse(localStorage.getItem("iside.apps")||"[]"));if("Notification" in window)setNotify(Notification.permission)}catch{}},[]);
- async function check(){setChecking(true);const next=[...apps];for(let i=0;i<next.length;i++){const r=next[i];if(r.updateSource?.type==="github"&&r.updateSource.repo){try{const res=await fetch("https://api.github.com/repos/"+r.updateSource.repo+"/releases/latest",{headers:{Accept:"application/vnd.github+json"}});if(res.ok){const j=await res.json();next[i]={...r,latest:String(j.tag_name||"").replace(/^v/i,"")}}catch{}}}setApps(next);localStorage.setItem("iside.apps",JSON.stringify(next));setChecking(false);if("Notification" in window&&Notification.permission==="granted"&&"serviceWorker" in navigator){const reg=await navigator.serviceWorker.ready;for(const r of next){const d=daysLeft(r.signing?.expiresAt);const update=r.latest&&r.app?.version&&cmp(r.latest,r.app.version)>0;if(update)reg.showNotification(r.app.name+" update available",{body:"Version "+r.latest+" is available. Open iSide Manager for details.",icon:"/icon.svg",tag:"update-"+r.app.bundleId});if(d!==null&&d<=10)reg.showNotification(r.app.name+" signing needs attention",{body:d<0?"Signing record is expired.":"Signing expires in "+d+" day"+(d===1?"":"s")+".",icon:"/icon.svg",tag:"sign-"+r.app.bundleId})}}}
+ const [apps,setApps]=useState<Rec[]>([]);
+ const [checking,setChecking]=useState(false);
+ const [notify,setNotify]=useState("default");
+
+ useEffect(()=>{let loaded:Rec[]=[];try{loaded=JSON.parse(localStorage.getItem("iside.apps")||"[]");setApps(loaded);if("Notification" in window)setNotify(Notification.permission);if(loaded.length)void refresh(loaded,false)}catch{}},[]);
+
+ async function refresh(input:Rec[]=apps,sendNotifications=true){
+  setChecking(true);
+  const next=[...input];
+  for(let i=0;i<next.length;i++){
+   const r=next[i];
+   if(r.updateSource?.type==="github"&&r.updateSource.repo){
+    try{
+     const res=await fetch("https://api.github.com/repos/"+r.updateSource.repo+"/releases/latest",{headers:{Accept:"application/vnd.github+json"}});
+     if(res.ok){
+      const j=await res.json();
+      next[i]={...r,latest:String(j.tag_name||"").replace(/^v/i,"")};
+     }
+    }catch{}
+   }
+  }
+  setApps(next);
+  localStorage.setItem("iside.apps",JSON.stringify(next));
+  setChecking(false);
+
+  if(sendNotifications&&"Notification" in window&&Notification.permission==="granted"&&"serviceWorker" in navigator){
+   const reg=await navigator.serviceWorker.ready;
+   for(const r of next){
+    const d=daysLeft(r.signing?.expiresAt);
+    const update=!!(r.latest&&r.app?.version&&cmp(r.latest,r.app.version)>0);
+    if(update)reg.showNotification(r.app.name+" update available",{body:"Version "+r.latest+" is available. Open iSide Manager for details.",icon:"/icon.svg",tag:"update-"+r.app.bundleId});
+    if(d!==null&&d<=10)reg.showNotification(r.app.name+" signing needs attention",{body:d<0?"Signing record is expired.":"Signing expires in "+d+" day"+(d===1?"":"s")+".",icon:"/icon.svg",tag:"sign-"+r.app.bundleId});
+   }
+  }
+ }
+
  async function enable(){if(!("Notification" in window))return;const p=await Notification.requestPermission();setNotify(p)}
  function remove(id:string){const n=apps.filter(a=>a.id!==id);setApps(n);localStorage.setItem("iside.apps",JSON.stringify(n))}
- return <><Nav/><main><div className="wrap" style={{paddingTop:64,paddingBottom:20}}><div className="eyebrow"><ShieldCheck size={14}/> iSIDE MANAGER</div><h1 style={{fontSize:"clamp(42px,6vw,68px)"}}>Your apps.<br/>One health check.</h1><p className="lead">Track the version source you supplied and the signing-expiry record returned by the installer.</p><div className="actions"><button className="btn primary" onClick={check} disabled={checking}><RefreshCw size={17}/>{checking?"Checking…":"Check now"}</button>{notify!=="granted"&&<button className="btn secondary" onClick={enable}><BellRing size={17}/>Enable reminders</button>}<a className="btn ghost" href="/">Install another IPA</a></div><div className="notice">Background web push needs a notification backend. This build checks and notifies when iSide Manager is opened or when you press “Check now”.</div></div>
- <section className="section"><div className="wrap">{apps.length?<div className="managerGrid">{apps.map(r=>{const d=daysLeft(r.signing?.expiresAt);const update=!!(r.latest&&r.app?.version&&cmp(r.latest,r.app.version)>0);const pct=d===null?0:Math.max(0,Math.min(100,d/30*100));return <div className="glass appcard" key={r.id}><div className="appTop"><div style={{display:"flex",gap:12}}><div className="appIcon">{r.app.icon?<img src={r.app.icon} alt=""/>:<span>iS</span>}</div><div><h3>{r.app.name}</h3><div className="tiny">{r.app.bundleId}</div></div></div><button className="btn ghost" style={{width:42,minHeight:42,padding:0}} onClick={()=>remove(r.id)}><Trash2 size={16}/></button></div><div style={{marginTop:18}}><div className="kv"><span>Installed</span><span>{r.app.version} ({r.app.build})</span></div><div className="kv"><span>Latest</span><span>{r.updateSource?(r.latest||"Check required"):"No update source"}</span></div><div className="kv"><span>Signing</span><span>{r.signing?.status||(r.signing?"Recorded":"No signing record")}</span></div><div className="kv"><span>Authority</span><span>{r.signing?.authority||"Not supplied"}</span></div></div>{r.signing?.expiresAt&&<><div className="appTop" style={{marginTop:16}}><span className="tiny">SIGNING TIME LEFT</span><span className={"status "+(d!==null&&d<=3?"bad":d!==null&&d<=10?"warn":"good")}>{d!==null?(d<0?"Expired":d+" days"):"Unknown"}</span></div><div className="progress"><div style={{width:pct+"%"}}/></div></>}{update&&<div className="notice"><b>Update available:</b> {r.latest}</div>}{d!==null&&d<=10&&<div className="notice" style={{borderColor:"#6a4c25"}}><AlertTriangle size={14} style={{verticalAlign:"middle",marginRight:6}}/>Renew signing before this record expires.</div>}{r.updateSource?.repo&&<div className="actions"><a className="btn ghost" target="_blank" href={"https://github.com/"+r.updateSource.repo+"/releases/latest"}><ExternalLink size={15}/>Open releases</a></div>}</div>})}</div>:<div className="glass empty"><ShieldCheck size={42}/><h2 style={{fontSize:28,marginTop:14}}>No managed apps yet</h2><p>Install an IPA through iSide and its health record will appear here.</p><div className="actions" style={{justifyContent:"center"}}><a className="btn primary" href="/">Go to installer</a></div></div>}</div></section></main></>;
+
+ return <><Nav/><main>
+  <div className="wrap" style={{paddingTop:64,paddingBottom:20}}>
+   <div className="eyebrow"><ShieldCheck size={14}/> iSIDE MANAGER</div>
+   <h1 style={{fontSize:"clamp(42px,6vw,68px)"}}>Your apps.<br/>One health check.</h1>
+   <p className="lead">Track the version source you supplied and the signing-expiry record returned by the installer.</p>
+   <div className="actions"><button className="btn primary" onClick={()=>refresh()} disabled={checking}><RefreshCw size={17}/>{checking?"Checking…":"Check now"}</button>{notify!=="granted"&&<button className="btn secondary" onClick={enable}><BellRing size={17}/>Enable reminders</button>}<a className="btn ghost" href="/">Install another IPA</a></div>
+   <div className="notice">iSide checks update sources automatically when Manager opens. Background notifications while the PWA is fully closed require the planned Web Push backend.</div>
+  </div>
+  <section className="section"><div className="wrap">
+   {apps.length?<div className="managerGrid">{apps.map(r=>{
+    const d=daysLeft(r.signing?.expiresAt);
+    const update=!!(r.latest&&r.app?.version&&cmp(r.latest,r.app.version)>0);
+    const pct=d===null?0:Math.max(0,Math.min(100,d/30*100));
+    return <div className="glass appcard" key={r.id}>
+     <div className="appTop"><div style={{display:"flex",gap:12}}><div className="appIcon">{r.app.icon?<img src={r.app.icon} alt=""/>:<span>iS</span>}</div><div><h3>{r.app.name}</h3><div className="tiny">{r.app.bundleId}</div></div></div><button className="btn ghost" style={{width:42,minHeight:42,padding:0}} onClick={()=>remove(r.id)}><Trash2 size={16}/></button></div>
+     <div style={{marginTop:18}}><div className="kv"><span>Installed</span><span>{r.app.version} ({r.app.build})</span></div><div className="kv"><span>Latest</span><span>{r.updateSource?(r.latest||"Check required"):"No update source"}</span></div><div className="kv"><span>Signing</span><span>{r.signing?.status||(r.signing?"Recorded":"No signing record")}</span></div><div className="kv"><span>Authority</span><span>{r.signing?.authority||"Not supplied"}</span></div></div>
+     {r.signing?.expiresAt&&<><div className="appTop" style={{marginTop:16}}><span className="tiny">SIGNING TIME LEFT</span><span className={"status "+(d!==null&&d<=3?"bad":d!==null&&d<=10?"warn":"good")}>{d!==null?(d<0?"Expired":d+" days"):"Unknown"}</span></div><div className="progress"><div style={{width:pct+"%"}}/></div></>}
+     {update&&<div className="notice"><b>Update available:</b> {r.latest}</div>}
+     {d!==null&&d<=10&&<div className="notice" style={{borderColor:"#6a4c25"}}><AlertTriangle size={14} style={{verticalAlign:"middle",marginRight:6}}/>Renew signing before this record expires.</div>}
+     {r.updateSource?.repo&&<div className="actions"><a className="btn ghost" target="_blank" href={"https://github.com/"+r.updateSource.repo+"/releases/latest"}><ExternalLink size={15}/>Open releases</a></div>}
+    </div>
+   })}</div>:<div className="glass empty"><ShieldCheck size={42}/><h2 style={{fontSize:28,marginTop:14}}>No managed apps yet</h2><p>Install an IPA through iSide and its health record will appear here.</p><div className="actions" style={{justifyContent:"center"}}><a className="btn primary" href="/">Go to installer</a></div></div>}
+  </div></section>
+ </main></>;
 }

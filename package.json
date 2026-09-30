@@ -1,0 +1,27 @@
+{
+  "name": "iside",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "16.0.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "jszip": "3.10.1",
+    "plist": "3.1.0",
+    "bplist-parser": "0.3.2",
+    "buffer": "6.0.3",
+    "lucide-react": "0.468.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/react": "19.0.3",
+    "@types/react-dom": "19.0.2",
+    "typescript": "5.7.2"
+  }
+}

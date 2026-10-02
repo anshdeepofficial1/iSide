@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  ArrowUpRight,
+  CalendarDays,
   Clapperboard,
   Copy,
   Download,
@@ -11,14 +11,11 @@ import {
   FileVideo,
   Instagram,
   LoaderCircle,
-  Play,
-  RefreshCcw,
   Scissors,
+  Share2,
   Sparkles,
   Upload,
-  Youtube,
 } from "lucide-react";
-import type { LatestVideo, ShortClip, TranscriptSegment } from "@/lib/types";
 
 type FFmpegLike = {
   load: (o: any) => Promise<boolean>;
@@ -29,385 +26,537 @@ type FFmpegLike = {
   on: (event: string, cb: (payload: any) => void) => void;
 };
 
+type Clip = {
+  id: string;
+  title: string;
+  start: number;
+  end: number;
+  caption: string;
+  time: string;
+};
+
 type Rendered = Record<string, { url: string; fileName: string }>;
 
-const DEFAULT_CHANNEL = "https://youtube.com/@rojanabhaktii";
-const FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansgurmukhi/NotoSansGurmukhi%5Bwdth,wght%5D.ttf";
+const DEFAULT_TIMES = ["09:00", "13:00", "17:00", "20:30"];
+const IG_URL = "https://www.instagram.com/";
+const FB_URL = "https://www.facebook.com/";
+const META_SUITE = "https://business.facebook.com/";
 
-function fmtTime(sec: number) {
+function fmt(sec: number) {
   const s = Math.max(0, Math.round(sec));
   const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${m}:${String(r).padStart(2, "0")}`;
+  return `${m}:${String(s % 60).padStart(2, "0")}`;
 }
 
-function getVideoDuration(file: File) {
+function tomorrowISO() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function readDuration(file: File) {
   return new Promise<number>((resolve, reject) => {
     const url = URL.createObjectURL(file);
-    const video = document.createElement("video");
-    video.preload = "metadata";
-    video.onloadedmetadata = () => {
-      const d = video.duration;
+    const v = document.createElement("video");
+    v.preload = "metadata";
+    v.onloadedmetadata = () => {
+      const d = v.duration;
       URL.revokeObjectURL(url);
       Number.isFinite(d) ? resolve(d) : reject(new Error("Could not read video duration."));
     };
-    video.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not open this video.")); };
-    video.src = url;
+    v.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not open this video."));
+    };
+    v.src = url;
   });
 }
 
-function wrapPunjabi(text: string, max = 30) {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-  let line = "";
-  for (const word of words) {
-    const next = line ? `${line} ${word}` : word;
-    if (next.length > max && line) { lines.push(line); line = word; }
-    else line = next;
-    if (lines.length === 2) break;
-  }
-  if (line && lines.length < 2) lines.push(line);
-  return lines.join("\n");
-}
+function makeAutoClips(duration: number): Clip[] {
+  const safeDuration = Math.max(1, duration);
 
-function clampClip(c: any, max: number, i: number): ShortClip {
-  const start = Math.max(0, Math.min(Number(c.start) || 0, Math.max(0, max - 5)));
-  const rawEnd = Number(c.end) || start + 35;
-  const end = Math.max(start + 5, Math.min(rawEnd, max || rawEnd));
-  return {
-    id: crypto.randomUUID(),
-    title: String(c.title || `Short ${i + 1}`),
-    start,
-    end,
-    reason: String(c.reason || "Selected from the transcript."),
-    socialCaption: String(c.socialCaption || "#Punjabi #Reels #Shorts"),
-    score: Math.max(0, Math.min(100, Number(c.score) || 70)),
-  };
+  if (safeDuration < 100) {
+    const part = safeDuration / 4;
+    return Array.from({ length: 4 }, (_, i) => ({
+      id: crypto.randomUUID(),
+      title: `Short ${i + 1}`,
+      start: i * part,
+      end: Math.min(safeDuration, (i + 1) * part),
+      caption: "",
+      time: DEFAULT_TIMES[i],
+    }));
+  }
+
+  const len = Math.min(45, Math.max(25, safeDuration / 10));
+  const anchors = [0.08, 0.33, 0.58, 0.82];
+
+  return anchors.map((p, i) => {
+    const start = Math.max(0, Math.min(safeDuration - len, safeDuration * p));
+    return {
+      id: crypto.randomUUID(),
+      title: `Short ${i + 1}`,
+      start,
+      end: Math.min(safeDuration, start + len),
+      caption: "",
+      time: DEFAULT_TIMES[i],
+    };
+  });
 }
 
 export default function Home() {
-  const [channel, setChannel] = useState(DEFAULT_CHANNEL);
-  const [latest, setLatest] = useState<LatestVideo | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [duration, setDuration] = useState(0);
-  const [segments, setSegments] = useState<TranscriptSegment[]>([]);
-  const [clips, setClips] = useState<ShortClip[]>([]);
+  const [clips, setClips] = useState<Clip[]>([]);
   const [rendered, setRendered] = useState<Rendered>({});
+  const [scheduleDate, setScheduleDate] = useState("");
   const [busy, setBusy] = useState("");
+  const [status, setStatus] = useState("Upload a long video to begin.");
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
-  const [status, setStatus] = useState("Ready");
-  const [instagramUrl, setInstagramUrl] = useState("https://www.instagram.com/");
-  const [facebookUrl, setFacebookUrl] = useState("https://www.facebook.com/");
 
   const ffmpegRef = useRef<FFmpegLike | null>(null);
-  const sourceReadyRef = useRef(false);
-  const fontReadyRef = useRef(false);
+  const sourceLoadedRef = useRef(false);
   const sourceNameRef = useRef("source.mp4");
 
   useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("iside-shorts-settings") || "{}");
-      if (saved.channel) setChannel(saved.channel);
-      if (saved.instagramUrl) setInstagramUrl(saved.instagramUrl);
-      if (saved.facebookUrl) setFacebookUrl(saved.facebookUrl);
-    } catch {}
+    setScheduleDate(tomorrowISO());
   }, []);
-
-  useEffect(() => {
-    localStorage.setItem("iside-shorts-settings", JSON.stringify({ channel, instagramUrl, facebookUrl }));
-  }, [channel, instagramUrl, facebookUrl]);
-
-  const canAnalyze = !!file && !busy;
-  const totalReady = Object.keys(rendered).length;
-
-  async function fetchLatest() {
-    setError(""); setBusy("youtube"); setStatus("Fetching latest YouTube upload…");
-    try {
-      const r = await fetch(`/api/youtube/latest?channel=${encodeURIComponent(channel)}`, { cache: "no-store" });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || "YouTube lookup failed.");
-      setLatest(data); setStatus("Latest upload found");
-    } catch (e) { setError(e instanceof Error ? e.message : "YouTube lookup failed."); setStatus("Ready"); }
-    finally { setBusy(""); }
-  }
 
   async function selectVideo(next: File | null) {
     if (!next) return;
-    setError(""); setFile(next); setSegments([]); setClips([]); setRendered({});
-    sourceReadyRef.current = false; fontReadyRef.current = false;
-    const ext = next.name.split(".").pop()?.toLowerCase() || "mp4";
-    sourceNameRef.current = `source.${ext.replace(/[^a-z0-9]/g, "") || "mp4"}`;
-    try { setDuration(await getVideoDuration(next)); }
-    catch (e) { setError(e instanceof Error ? e.message : "Could not read video."); }
+    setError("");
+    setFile(next);
+    setClips([]);
+    setRendered({});
+    setProgress(0);
+    sourceLoadedRef.current = false;
+    const ext = next.name.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "mp4";
+    sourceNameRef.current = `source.${ext}`;
+
+    try {
+      const d = await readDuration(next);
+      setDuration(d);
+      setStatus(`Ready: ${next.name} · ${fmt(d)}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not read video.");
+    }
   }
 
   async function loadFFmpeg() {
     if (ffmpegRef.current) return ffmpegRef.current;
-    setStatus("Loading local video engine (~30 MB once)…");
-    const [{ FFmpeg }, { toBlobURL }] = await Promise.all([import("@ffmpeg/ffmpeg"), import("@ffmpeg/util")]);
+    setStatus("Loading local video engine…");
+    const [{ FFmpeg }, { toBlobURL }] = await Promise.all([
+      import("@ffmpeg/ffmpeg"),
+      import("@ffmpeg/util"),
+    ]);
+
     const ffmpeg: any = new FFmpeg();
     ffmpeg.on("progress", ({ progress: p }: any) => {
       if (Number.isFinite(p)) setProgress(Math.max(0, Math.min(99, Math.round(p * 100))));
     });
-    const baseURL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
+
+    const base = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
     await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+      coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, "text/javascript"),
+      wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, "application/wasm"),
     });
+
     ffmpegRef.current = ffmpeg;
     return ffmpeg;
   }
 
   async function ensureSource(ffmpeg: FFmpegLike) {
-    if (sourceReadyRef.current || !file) return;
+    if (!file || sourceLoadedRef.current) return;
     const { fetchFile } = await import("@ffmpeg/util");
-    setStatus("Loading your master video locally…");
+    setStatus("Loading your video locally…");
     await ffmpeg.writeFile(sourceNameRef.current, await fetchFile(file));
-    sourceReadyRef.current = true;
+    sourceLoadedRef.current = true;
   }
 
-  async function cleanTranscript(raw: TranscriptSegment[]) {
-    const out = [...raw];
-    for (let i = 0; i < out.length; i += 35) {
-      const batch = out.slice(i, i + 35);
-      try {
-        const r = await fetch("/api/ai/clean", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts: batch.map(x => x.text) }) });
-        const data = await r.json();
-        if (Array.isArray(data.texts) && data.texts.length === batch.length) data.texts.forEach((t: string, j: number) => out[i + j] = { ...out[i + j], text: t });
-      } catch {}
-    }
-    return out;
+  async function renderOne(ffmpeg: FFmpegLike, clip: Clip, index: number) {
+    const name = `short-${index + 1}.mp4`;
+    const length = Math.max(3, clip.end - clip.start);
+
+    setStatus(`Creating Short ${index + 1}/4…`);
+    setProgress(0);
+
+    const filter =
+      "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=18:4[bg];" +
+      "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];" +
+      "[bg][fg]overlay=(W-w)/2:(H-h)/2[v]";
+
+    await ffmpeg.exec([
+      "-ss", String(clip.start),
+      "-t", String(length),
+      "-i", sourceNameRef.current,
+      "-filter_complex", filter,
+      "-map", "[v]",
+      "-map", "0:a?",
+      "-c:v", "libx264",
+      "-preset", "ultrafast",
+      "-crf", "24",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-b:a", "128k",
+      "-movflags", "+faststart",
+      name,
+    ]);
+
+    const out = await ffmpeg.readFile(name);
+    const blob = new Blob([out as BlobPart], { type: "video/mp4" });
+    const url = URL.createObjectURL(blob);
+
+    setRendered(old => {
+      const previous = old[clip.id]?.url;
+      if (previous) URL.revokeObjectURL(previous);
+      return { ...old, [clip.id]: { url, fileName: name } };
+    });
+
+    await ffmpeg.deleteFile(name).catch(() => {});
   }
 
-  async function analyzeVideo() {
-    if (!file) return;
-    setError(""); setBusy("analyze"); setProgress(0); setSegments([]); setClips([]); setRendered({});
+  async function createFourShorts() {
+    if (!file || !duration) return;
+
+    setError("");
+    setBusy("create");
+    setRendered({});
+    setProgress(0);
+
     try {
+      const auto = makeAutoClips(duration);
+      setClips(auto);
+
       const ffmpeg = await loadFFmpeg();
       await ensureSource(ffmpeg);
-      const chunkSeconds = 180;
-      const transcript: TranscriptSegment[] = [];
-      const count = Math.ceil(duration / chunkSeconds);
-      for (let i = 0; i < count; i++) {
-        const offset = i * chunkSeconds;
-        const len = Math.min(chunkSeconds, duration - offset);
-        const audioName = `audio-${i}.mp3`;
-        setStatus(`Transcribing Punjabi audio ${i + 1}/${count}…`);
-        setProgress(Math.round((i / Math.max(1, count)) * 55));
-        await ffmpeg.exec(["-ss", String(offset), "-t", String(len), "-i", sourceNameRef.current, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "24k", audioName]);
-        const audio = await ffmpeg.readFile(audioName);
-        const blob = new Blob([audio as BlobPart], { type: "audio/mpeg" });
-        const form = new FormData();
-        form.append("file", new File([blob], audioName, { type: "audio/mpeg" }));
-        form.append("offset", String(offset));
-        const r = await fetch("/api/transcribe", { method: "POST", body: form });
-        const data = await r.json();
-        await ffmpeg.deleteFile(audioName).catch(() => {});
-        if (!r.ok) throw new Error(data.error || "Punjabi transcription failed.");
-        transcript.push(...(data.segments || []));
-      }
-      setStatus("Correcting Punjabi captions…"); setProgress(65);
-      const cleaned = await cleanTranscript(transcript);
-      setSegments(cleaned);
-      setStatus("Choosing four strongest short-form moments…"); setProgress(78);
-      const pick = await fetch("/api/ai/shorts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ segments: cleaned, videoTitle: latest?.title || file.name }) });
-      const picked = await pick.json();
-      if (!pick.ok) throw new Error(picked.error || "Could not select clips.");
-      const nextClips = (picked.clips || []).slice(0, 4).map((c: any, i: number) => clampClip(c, duration, i));
-      setClips(nextClips);
-      setProgress(100); setStatus("4 shorts selected — review and render them");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Analysis failed.");
-      setStatus("Ready"); setProgress(0);
-    } finally { setBusy(""); }
-  }
 
-  async function ensureFont(ffmpeg: FFmpegLike) {
-    if (fontReadyRef.current) return;
-    const { fetchFile } = await import("@ffmpeg/util");
-    setStatus("Loading Punjabi caption font…");
-    await ffmpeg.writeFile("gurmukhi.ttf", await fetchFile(FONT_URL));
-    fontReadyRef.current = true;
-  }
-
-  async function renderClip(clip: ShortClip) {
-    if (!file) return;
-    setError(""); setBusy(`render-${clip.id}`); setProgress(0);
-    const outputName = `short-${clips.findIndex(c => c.id === clip.id) + 1}.mp4`;
-    const capNames: string[] = [];
-    try {
-      const ffmpeg = await loadFFmpeg();
-      await ensureSource(ffmpeg);
-      await ensureFont(ffmpeg);
-      const active = segments.filter(s => s.end > clip.start && s.start < clip.end).slice(0, 24);
-      const draws: string[] = [];
-      for (let i = 0; i < active.length; i++) {
-        const s = active[i];
-        const cap = `cap-${clip.id}-${i}.txt`;
-        capNames.push(cap);
-        await ffmpeg.writeFile(cap, new TextEncoder().encode(wrapPunjabi(s.text)));
-        const a = Math.max(0, s.start - clip.start).toFixed(2);
-        const b = Math.min(clip.end - clip.start, s.end - clip.start).toFixed(2);
-        draws.push(`drawtext=fontfile=/gurmukhi.ttf:textfile=/${cap}:fontcolor=white:fontsize=62:borderw=4:bordercolor=black@0.95:box=1:boxcolor=black@0.45:boxborderw=24:line_spacing=8:x=(w-text_w)/2:y=h*0.76:enable='between(t\\,${a}\\,${b})'`);
+      for (let i = 0; i < auto.length; i++) {
+        await renderOne(ffmpeg, auto[i], i);
       }
-      const captions = draws.length ? `,${draws.join(",")}` : "";
-      const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=16:2[bg];[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2${captions}[v]`;
-      setStatus(`Rendering ${clip.title} locally…`);
-      await ffmpeg.exec([
-        "-ss", String(clip.start), "-t", String(clip.end - clip.start), "-i", sourceNameRef.current,
-        "-filter_complex", filter,
-        "-map", "[v]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", outputName,
-      ]);
-      const data = await ffmpeg.readFile(outputName);
-      const blob = new Blob([data as BlobPart], { type: "video/mp4" });
-      const url = URL.createObjectURL(blob);
-      setRendered(old => {
-        if (old[clip.id]?.url) URL.revokeObjectURL(old[clip.id].url);
-        return { ...old, [clip.id]: { url, fileName: outputName } };
-      });
-      await ffmpeg.deleteFile(outputName).catch(() => {});
-      setProgress(100); setStatus(`${clip.title} is ready`);
+
+      setProgress(100);
+      setStatus("All 4 shorts are ready. Review, edit timing if needed, then share.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Rendering failed.");
-      setStatus("Render failed");
+      setError(e instanceof Error ? e.message : "Could not create shorts.");
+      setStatus("Creation stopped.");
     } finally {
-      const ffmpeg = ffmpegRef.current;
-      if (ffmpeg) for (const cap of capNames) await ffmpeg.deleteFile(cap).catch(() => {});
       setBusy("");
     }
   }
 
-  async function renderAll() {
-    for (const clip of clips) if (!rendered[clip.id]) await renderClip(clip);
+  async function rerender(clip: Clip, index: number) {
+    if (!file) return;
+    setError("");
+    setBusy(`render-${clip.id}`);
+    try {
+      const ffmpeg = await loadFFmpeg();
+      await ensureSource(ffmpeg);
+      await renderOne(ffmpeg, clip, index);
+      setStatus(`Short ${index + 1} updated.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not render short.");
+    } finally {
+      setBusy("");
+    }
   }
 
-  async function copyCaption(text: string) {
-    await navigator.clipboard.writeText(text);
-    setStatus("Caption copied");
+  function updateClip(id: string, patch: Partial<Clip>) {
+    setClips(old => old.map(c => c.id === id ? { ...c, ...patch } : c));
   }
 
-  function downloadRendered(clip: ShortClip) {
-    const item = rendered[clip.id]; if (!item) return;
-    const a = document.createElement("a"); a.href = item.url; a.download = item.fileName; a.click();
-  }
-
-  async function handoff(clip: ShortClip, target: "instagram" | "facebook") {
+  function downloadClip(clip: Clip) {
     const item = rendered[clip.id];
-    if (!item) { setError("Render this short first."); return; }
+    if (!item) return;
+    const a = document.createElement("a");
+    a.href = item.url;
+    a.download = item.fileName;
+    a.click();
+  }
+
+  async function copyCaption(clip: Clip) {
+    if (!clip.caption.trim()) {
+      setStatus("Caption is empty — add one if you want to copy it.");
+      return;
+    }
+    await navigator.clipboard.writeText(clip.caption);
+    setStatus("Caption copied.");
+  }
+
+  async function shareClip(clip: Clip, target: "instagram" | "facebook") {
+    const item = rendered[clip.id];
+    if (!item) {
+      setError("This short is not rendered yet.");
+      return;
+    }
+
     try {
       const blob = await fetch(item.url).then(r => r.blob());
       const media = new File([blob], item.fileName, { type: "video/mp4" });
       const nav = navigator as any;
+
       if (nav.share && nav.canShare?.({ files: [media] })) {
-        await nav.share({ files: [media], text: clip.socialCaption, title: clip.title });
-        setStatus(`Share sheet opened — choose ${target === "instagram" ? "Instagram" : "Facebook"} and press the final Post button there.`);
+        await nav.share({
+          files: [media],
+          text: clip.caption || undefined,
+          title: `${clip.title} · ${scheduleDate} ${clip.time}`,
+        });
+        setStatus(
+          `Video handed to the phone share sheet. Choose ${target === "instagram" ? "Instagram" : "Facebook"}, then set ${scheduleDate} at ${clip.time} inside the app.`
+        );
         return;
       }
     } catch (e: any) {
       if (e?.name === "AbortError") return;
     }
-    await navigator.clipboard.writeText(clip.socialCaption).catch(() => {});
-    downloadRendered(clip);
-    window.open(target === "instagram" ? instagramUrl : facebookUrl, "_blank", "noopener,noreferrer");
-    setStatus("Desktop fallback: video downloaded, caption copied, and the social site opened in a new tab.");
+
+    if (clip.caption.trim()) {
+      await navigator.clipboard.writeText(clip.caption).catch(() => {});
+    }
+    downloadClip(clip);
+    window.open(target === "instagram" ? IG_URL : FB_URL, "_blank", "noopener,noreferrer");
+    setStatus(
+      `Desktop mode: MP4 downloaded${clip.caption.trim() ? ", caption copied" : ""}, and ${target === "instagram" ? "Instagram" : "Facebook"} opened. Set ${scheduleDate} at ${clip.time} there.`
+    );
   }
 
-  function updateClip(id: string, patch: Partial<ShortClip>) {
-    setClips(old => old.map(c => c.id === id ? { ...c, ...patch } : c));
+  function copySchedule() {
+    const text = clips
+      .map((c, i) => `Short ${i + 1}: ${scheduleDate} at ${c.time}`)
+      .join("\n");
+    navigator.clipboard.writeText(text);
+    setStatus("4-slot schedule copied.");
   }
 
   return (
     <main>
       <header className="topbar">
         <div className="shell topin">
-          <div className="brand"><div className="logo"><Scissors size={19}/></div><div><b>iSide Shorts Studio</b><span>YouTube → Punjabi Reels</span></div></div>
-          <div className="live"><span/> Manual final-post mode</div>
+          <div className="brand">
+            <div className="logo"><Scissors size={19}/></div>
+            <div>
+              <b>iSide Shorts Studio</b>
+              <span>Local video → 4 ready reels</span>
+            </div>
+          </div>
+          <div className="live"><span/> No API keys</div>
         </div>
       </header>
 
       <div className="shell">
         <section className="hero">
           <div>
-            <div className="eyebrow"><Sparkles size={14}/> ZERO-AUTO-POST WORKFLOW</div>
-            <h1>One long video.<br/><em>Four ready-to-post shorts.</em></h1>
-            <p>Fetch your latest YouTube upload, analyze the original master video, generate four vertical clips with Punjabi captions, then hand each one to Instagram or Facebook. You keep the final Post button.</p>
+            <div className="eyebrow"><Sparkles size={14}/> 100% LOCAL PROCESSING</div>
+            <h1>Upload one video.<br/><em>Get four ready reels.</em></h1>
+            <p>
+              No YouTube fetch, no Groq key, no Meta API. Your browser creates four separate
+              vertical MP4s locally. Then you share each one to Instagram or Facebook and set
+              the final schedule inside the platform.
+            </p>
           </div>
+
           <div className="heroStats">
-            <div><b>4</b><span>shorts per upload</span></div>
+            <div><b>4</b><span>auto-created shorts</span></div>
             <div><b>9:16</b><span>vertical MP4</span></div>
-            <div><b>ਪੰਜਾਬੀ</b><span>burned captions</span></div>
+            <div><b>0</b><span>API keys required</span></div>
           </div>
         </section>
 
-        <section className="grid2">
-          <div className="panel">
-            <div className="panelTitle"><Youtube size={19}/><div><b>1. YouTube source</b><span>Public channel link — no login required</span></div></div>
-            <label>Channel URL or @handle</label>
-            <div className="inputRow"><input value={channel} onChange={e=>setChannel(e.target.value)} placeholder="https://youtube.com/@channel"/><button onClick={fetchLatest} disabled={!!busy}>{busy === "youtube" ? <LoaderCircle className="spin"/> : <RefreshCcw size={17}/>} Fetch latest</button></div>
-            {latest && <div className="latest"><img src={latest.thumbnail} alt=""/><div><span className="pill">LATEST UPLOAD</span><b>{latest.title}</b><small>{latest.channelTitle} · {new Date(latest.published).toLocaleString()}</small><a href={latest.url} target="_blank">Open on YouTube <ArrowUpRight size={13}/></a></div></div>}
+        <section className="panel uploadPanel">
+          <div className="panelTitle">
+            <FileVideo size={19}/>
+            <div>
+              <b>1. Upload your long video</b>
+              <span>The source stays on your device</span>
+            </div>
           </div>
 
-          <div className="panel">
-            <div className="panelTitle"><FileVideo size={19}/><div><b>2. Original master video</b><span>The actual file stays in your browser</span></div></div>
-            <label className="drop">
-              <input type="file" accept="video/*" onChange={e=>selectVideo(e.target.files?.[0] || null)}/>
-              <Upload size={24}/><b>{file ? file.name : "Choose the original video"}</b>
-              <span>{file ? `${(file.size / 1073741824).toFixed(2)} GB · ${fmtTime(duration)}` : "MP4 / MOV / MKV / WebM"}</span>
-            </label>
-            <button className="wide primary" disabled={!canAnalyze} onClick={analyzeVideo}>{busy === "analyze" ? <LoaderCircle className="spin"/> : <Sparkles size={17}/>} Analyze Punjabi & pick 4 shorts</button>
+          <label className="drop">
+            <input
+              type="file"
+              accept="video/*"
+              onChange={e => selectVideo(e.target.files?.[0] || null)}
+            />
+            <Upload size={28}/>
+            <b>{file ? file.name : "Choose a video"}</b>
+            <span>{file ? `${(file.size / 1048576).toFixed(1)} MB · ${fmt(duration)}` : "MP4 / MOV / MKV / WebM"}</span>
+          </label>
+
+          <button
+            className="wide primary createBtn"
+            disabled={!file || !duration || !!busy}
+            onClick={createFourShorts}
+          >
+            {busy === "create" ? <LoaderCircle className="spin"/> : <Clapperboard size={18}/>}
+            {busy === "create" ? "Creating 4 Shorts…" : "Create 4 Shorts"}
+          </button>
+
+          <div className="statusBox">
+            <span>{status}</span>
+            {progress > 0 && progress < 100 && <div className="bar"><i style={{ width: `${progress}%` }}/></div>}
           </div>
+
+          {error && <div className="error">{error}</div>}
+        </section>
+
+        <section className="panel schedulePanel">
+          <div className="panelTitle">
+            <CalendarDays size={19}/>
+            <div>
+              <b>2. Posting day</b>
+              <span>All 4 reels stay on the same day, with separate time slots</span>
+            </div>
+          </div>
+
+          <div className="scheduleHead">
+            <div>
+              <label>Schedule date</label>
+              <input
+                type="date"
+                value={scheduleDate}
+                min={new Date().toISOString().slice(0, 10)}
+                onChange={e => setScheduleDate(e.target.value)}
+              />
+            </div>
+            <button className="secondaryBtn" disabled={!clips.length} onClick={copySchedule}>
+              <Copy size={15}/> Copy 4-slot schedule
+            </button>
+            <a className="secondaryBtn" href={META_SUITE} target="_blank">
+              <ExternalLink size={15}/> Open Meta Business Suite
+            </a>
+          </div>
+
+          <p className="hint">
+            The four default times are editable. With no Meta API, this site cannot press Instagram/Facebook's
+            future-schedule control for you; it prepares the files and hands them off, while you set the shown
+            date/time inside Instagram, Facebook, or Meta Business Suite.
+          </p>
         </section>
 
         <section className="panel workspace">
-          <div className="workspaceHead">
-            <div className="panelTitle"><Clapperboard size={19}/><div><b>3. Shorts workspace</b><span>Edit timings before rendering</span></div></div>
-            <div className="statusline"><span>{status}</span>{progress > 0 && progress < 100 && <div className="bar"><i style={{width:`${progress}%`}}/></div>}</div>
+          <div className="panelTitle">
+            <Clapperboard size={19}/>
+            <div>
+              <b>3. Your 4 Shorts</b>
+              <span>Edit start/end, caption, and time before sharing</span>
+            </div>
           </div>
-          {error && <div className="error">{error}</div>}
-          {!clips.length ? <div className="empty"><Scissors size={34}/><b>Your 4 shorts will appear here</b><span>Fetch the latest upload, choose its original master file, then run analysis.</span></div> : <>
+
+          {!clips.length ? (
+            <div className="empty">
+              <Scissors size={34}/>
+              <b>No shorts yet</b>
+              <span>Upload a video and press Create 4 Shorts.</span>
+            </div>
+          ) : (
             <div className="cards">
               {clips.map((clip, index) => {
-                const ready = rendered[clip.id];
-                return <article className="shortCard" key={clip.id}>
-                  <div className="shortTop"><span className="number">0{index + 1}</span><span className="score">AI pick {clip.score}/100</span></div>
-                  <input className="titleInput" value={clip.title} onChange={e=>updateClip(clip.id,{title:e.target.value})}/>
-                  <p>{clip.reason}</p>
-                  <div className="timings"><label>Start<input type="number" step="0.1" value={clip.start.toFixed(1)} onChange={e=>updateClip(clip.id,{start:Number(e.target.value)})}/></label><label>End<input type="number" step="0.1" value={clip.end.toFixed(1)} onChange={e=>updateClip(clip.id,{end:Number(e.target.value)})}/></label><span>{Math.max(0, clip.end-clip.start).toFixed(0)}s</span></div>
-                  <textarea value={clip.socialCaption} onChange={e=>updateClip(clip.id,{socialCaption:e.target.value})}/>
-                  {ready ? <video className="preview" src={ready.url} controls playsInline/> : <div className="preview placeholder"><Play size={26}/><span>Render to preview</span></div>}
-                  <div className="cardActions">
-                    <button onClick={()=>renderClip(clip)} disabled={!!busy}>{busy === `render-${clip.id}` ? <LoaderCircle className="spin"/> : <Clapperboard size={15}/>} {ready ? "Re-render" : "Render"}</button>
-                    <button onClick={()=>copyCaption(clip.socialCaption)}><Copy size={15}/> Caption</button>
-                    {ready && <button onClick={()=>downloadRendered(clip)}><Download size={15}/> MP4</button>}
-                  </div>
-                  <div className="shareRow">
-                    <button className="insta" disabled={!ready} onClick={()=>handoff(clip,"instagram")}><Instagram size={16}/> Instagram</button>
-                    <button className="fb" disabled={!ready} onClick={()=>handoff(clip,"facebook")}><Facebook size={16}/> Facebook</button>
-                  </div>
-                </article>
+                const item = rendered[clip.id];
+                return (
+                  <article className="shortCard" key={clip.id}>
+                    <div className="shortTop">
+                      <span className="number">0{index + 1}</span>
+                      <span className="slot">{scheduleDate || "Date"} · {clip.time}</span>
+                    </div>
+
+                    <input
+                      className="titleInput"
+                      value={clip.title}
+                      onChange={e => updateClip(clip.id, { title: e.target.value })}
+                    />
+
+                    <div className="timings">
+                      <label>
+                        Start
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={clip.start.toFixed(1)}
+                          onChange={e => updateClip(clip.id, { start: Number(e.target.value) })}
+                        />
+                      </label>
+                      <label>
+                        End
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={clip.end.toFixed(1)}
+                          onChange={e => updateClip(clip.id, { end: Number(e.target.value) })}
+                        />
+                      </label>
+                      <label>
+                        Time
+                        <input
+                          type="time"
+                          value={clip.time}
+                          onChange={e => updateClip(clip.id, { time: e.target.value })}
+                        />
+                      </label>
+                    </div>
+
+                    <textarea
+                      placeholder="Optional caption — you can also leave this blank and write it inside Instagram/Facebook."
+                      value={clip.caption}
+                      onChange={e => updateClip(clip.id, { caption: e.target.value })}
+                    />
+
+                    {item ? (
+                      <video className="preview" src={item.url} controls playsInline/>
+                    ) : (
+                      <div className="preview placeholder">
+                        <LoaderCircle className={busy ? "spin" : ""}/>
+                        <span>{busy ? "Rendering…" : "Not rendered yet"}</span>
+                      </div>
+                    )}
+
+                    <div className="cardActions">
+                      <button disabled={!!busy} onClick={() => rerender(clip, index)}>
+                        {busy === `render-${clip.id}` ? <LoaderCircle className="spin"/> : <Clapperboard size={15}/>}
+                        Re-render
+                      </button>
+                      <button disabled={!item} onClick={() => downloadClip(clip)}>
+                        <Download size={15}/> MP4
+                      </button>
+                      <button onClick={() => copyCaption(clip)}>
+                        <Copy size={15}/> Caption
+                      </button>
+                    </div>
+
+                    <div className="shareRow">
+                      <button className="insta" disabled={!item} onClick={() => shareClip(clip, "instagram")}>
+                        <Instagram size={16}/> Share to Instagram
+                      </button>
+                      <button className="fb" disabled={!item} onClick={() => shareClip(clip, "facebook")}>
+                        <Facebook size={16}/> Share to Facebook
+                      </button>
+                    </div>
+                  </article>
+                );
               })}
             </div>
-            <button className="wide primary renderAll" onClick={renderAll} disabled={!!busy || totalReady === clips.length}><Clapperboard size={17}/> Render all remaining shorts ({clips.length - totalReady})</button>
-          </>}
+          )}
         </section>
 
-        <section className="grid2 settings">
-          <div className="panel">
-            <div className="panelTitle"><Instagram size={19}/><div><b>Instagram handoff</b><span>Used for desktop fallback</span></div></div>
-            <label>Instagram URL</label><input value={instagramUrl} onChange={e=>setInstagramUrl(e.target.value)} />
-            <p className="hint">On supported phones the button opens the native share sheet with the MP4 + caption. On desktop it downloads the MP4, copies the caption, and opens Instagram.</p>
-          </div>
-          <div className="panel">
-            <div className="panelTitle"><Facebook size={19}/><div><b>Facebook handoff</b><span>Used for desktop fallback</span></div></div>
-            <label>Facebook URL</label><input value={facebookUrl} onChange={e=>setFacebookUrl(e.target.value)} />
-            <p className="hint">No Meta token is stored because this version never auto-publishes. The final Post action always stays with you.</p>
+        <section className="panel infoPanel">
+          <Share2 size={20}/>
+          <div>
+            <b>How sharing works without APIs</b>
+            <p>
+              On supported phones, the actual MP4 is passed to the system share sheet so you can choose Instagram or Facebook.
+              On desktop, the MP4 is downloaded and the selected social site is opened. Your final Post/Schedule action always
+              stays inside Meta's own interface.
+            </p>
           </div>
         </section>
 
-        <footer><span>iSide Shorts Studio · Browser-first video processing</span><a href="https://github.com/anshdeepofficial1/iSide" target="_blank">GitHub <ExternalLink size={12}/></a></footer>
+        <footer>
+          <span>iSide Shorts Studio · Local-only workflow</span>
+          <a href="https://github.com/anshdeepofficial1/iSide" target="_blank">
+            GitHub <ExternalLink size={12}/>
+          </a>
+        </footer>
       </div>
     </main>
   );
